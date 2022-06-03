@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
@@ -10,27 +9,33 @@ import (
 	"log"
 	"net/http"
 	"os"
+
+	"github.com/keyneston/mochi-import/gomochi"
 )
 
 const (
-	APIBase = "https://app.mochi.cards/api/"
 	APICard = "/cards"
 )
 
 var (
-	templateID string
-	file       string
-	deckID     string
-	apiKey     string
-	content    string
+	templateID         string
+	templateConfigPath string
+	file               string
+	deckID             string
+	apiKey             string
+
+	noop  bool
+	debug bool
 )
 
 func main() {
 	flag.StringVar(&apiKey, "key", os.Getenv("MOCHI_API_KEY"), "API Key to use for access")
-	flag.StringVar(&file, "f", "", "CSV File to parse and import")
-	flag.StringVar(&deckID, "d", "", "DeckID to import to")
-	flag.StringVar(&templateID, "t", "", "Template ID to import as")
-	flag.StringVar(&content, "content", "", "Content to set")
+	flag.StringVar(&file, "file", "", "CSV File to parse and import")
+	flag.StringVar(&deckID, "deck", "", "DeckID to import to")
+	flag.StringVar(&templateID, "template", "", "Template ID or Name to import as")
+	flag.StringVar(&templateConfigPath, "template-config", "", "Path for template-config.json to import")
+	flag.BoolVar(&debug, "debug", false, "Debug logging")
+	flag.BoolVar(&noop, "noop", false, "Noop")
 	flag.Parse()
 
 	if apiKey == "" {
@@ -43,9 +48,25 @@ func main() {
 		log.Fatalf("Must set file to import from")
 	}
 
+	if templateConfigPath != "" {
+		if err := gomochi.LoadTemplateConfig(templateConfigPath); err != nil {
+			log.Fatalf("Error loading templates from %q: %v", templateConfigPath, err)
+		}
+	}
+
+	// card, err := c.GetCard("EQWk0qHZ")
+	// prettyPrint(card)
+	// log.Fatalf("err: %v", err)
+
 	if err := importFile(); err != nil {
 		log.Fatalf("Error: %v", err)
 	}
+}
+
+func prettyPrint(input any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(input)
 }
 
 func importFile() error {
@@ -57,8 +78,6 @@ func importFile() error {
 
 	c := csv.NewReader(f)
 
-	client := http.DefaultClient
-
 	headers, err := c.Read()
 	switch {
 	case err == io.EOF:
@@ -67,7 +86,12 @@ func importFile() error {
 		return err
 	}
 
-	count := 0
+	client := gomochi.Client{
+		APIKey: apiKey,
+		Noop:   noop,
+		Debug:  debug,
+	}
+
 	for {
 		record, err := c.Read()
 		switch {
@@ -80,31 +104,13 @@ func importFile() error {
 		if err := uploadCard(client, headers, record); err != nil {
 			return err
 		}
-
-		count++
-		if count == 10 {
-			return nil
-		}
 	}
 
 	return nil
 }
 
-type NewCardRequest struct {
-	Content    string               `json:"content"`
-	DeckID     string               `json:"deck-id"`
-	TemplateID string               `json:"template-id,omitempty"`
-	Fields     map[string]CardField `json:"fields,omitempty"`
-}
-
-type CardField struct {
-	ID    string `json:"id"`
-	Value string `json:"value"`
-}
-
-func uploadCard(client *http.Client, headers, record []string) error {
-	cardRequest := NewCardRequest{
-		Content:    content,
+func uploadCard(client gomochi.Client, headers, record []string) error {
+	card := gomochi.Card{
 		DeckID:     deckID,
 		TemplateID: templateID,
 	}
@@ -115,36 +121,11 @@ func uploadCard(client *http.Client, headers, record []string) error {
 	}
 
 	for i := range headers {
-		if cardRequest.Fields == nil {
-			cardRequest.Fields = make(map[string]CardField, len(headers))
-		}
-
-		cardRequest.Fields[headers[i]] = CardField{headers[i], record[i]}
+		card.AddField(headers[i], record[i])
 	}
 
-	buffer := &bytes.Buffer{}
-	if err := json.NewEncoder(buffer).Encode(cardRequest); err != nil {
+	if err := client.Request(APICard, http.MethodPost, card, nil); err != nil {
 		return err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, APIBase+APICard, buffer)
-	if err != nil {
-		return err
-	}
-	req.SetBasicAuth(apiKey, "")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		enc := json.NewEncoder(os.Stderr)
-		enc.SetIndent("", "  ")
-		enc.Encode(cardRequest)
-		return fmt.Errorf("Error setting row %v: status code %d; %v", record, resp.StatusCode, string(body))
 	}
 
 	return nil
